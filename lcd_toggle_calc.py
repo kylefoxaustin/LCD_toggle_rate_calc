@@ -108,6 +108,7 @@ class Params:
     f_r: float = 60.0              # refresh rate (Hz)
     regions: List[Region] = None   # content activity regions
     rho_override: float = 0.0      # manual blanking factor (0 = auto)
+    num_pins: int = None           # total pins to report (default = W)
 
     def __post_init__(self):
         if self.regions is None:
@@ -117,6 +118,8 @@ class Params:
                 Region(alpha=0.50, c=0.10, h=8),   # moderate activity
                 Region(alpha=0.20, c=1.0, h=12),   # video/animation
             ]
+        if self.num_pins is None:
+            self.num_pins = self.W
 
     def validate(self) -> List[str]:
         """Return list of validation errors, empty if valid."""
@@ -134,6 +137,8 @@ class Params:
             errors.append(f"Refresh rate={self.f_r} Hz must be positive")
         if self.rho_override < 0:
             errors.append(f"rho_override={self.rho_override} cannot be negative")
+        if self.num_pins <= 0:
+            errors.append(f"num_pins={self.num_pins} must be positive")
 
         # Validate regions
         if not self.regions:
@@ -207,6 +212,10 @@ class ActivityTool:
         # (actual distribution varies by bit position and content)
         per_pin = toggles_sec / self.p.W
 
+        # Total toggles across all specified pins
+        # (useful when modeling multiple interfaces or full GPIO bank)
+        total_pins_toggles = per_pin * self.p.num_pins
+
         return {
             "H_avg": H_avg,
             "active_rate": active_rate,
@@ -215,6 +224,8 @@ class ActivityTool:
             "AF": AF,
             "toggles_sec": toggles_sec,
             "per_pin": per_pin,
+            "total_pins_toggles": total_pins_toggles,
+            "num_pins": self.p.num_pins,
         }
 
     @staticmethod
@@ -260,6 +271,8 @@ def print_results(p: Params, res: Dict, verbose: bool = False):
     if verbose:
         print("\n--- Configuration ---")
         print(f"Bus width:      {p.W} bits")
+        if p.num_pins != p.W:
+            print(f"Total pins:     {p.num_pins}")
         print(f"Resolution:     {p.H} x {p.V}")
         print(f"Pixel clock:    {p.f_p_MHz} MHz")
         print(f"Refresh rate:   {p.f_r} Hz")
@@ -276,8 +289,9 @@ def print_results(p: Params, res: Dict, verbose: bool = False):
     print(f"Activity factor (AF):           {res['AF']:.6f}")
 
     print("\n--- Toggle Rates ---")
-    print(f"Toggles/sec (all pins): {format_engineering(res['toggles_sec'], 'toggles/s')}")
-    print(f"Per-pin toggles/sec:    {format_engineering(res['per_pin'], 'toggles/s')}")
+    print(f"Toggles/sec (data bus):   {format_engineering(res['toggles_sec'], 'toggles/s')}")
+    print(f"Per-pin toggles/sec:      {format_engineering(res['per_pin'], 'toggles/s')}")
+    print(f"Total ({res['num_pins']} pins) toggles/sec: {format_engineering(res['total_pins_toggles'], 'toggles/s')}")
 
     print("\n--- Lifetime Projections (quadrillions of toggles) ---")
     life = ActivityTool.lifetime_quadrillions(res["toggles_sec"])
@@ -303,8 +317,37 @@ def main():
         epilog="""
 Examples:
   %(prog)s --preset 1080p60 --content desktop
-  %(prog)s --H 800 --V 480 --fp 33.3 --fr 60
   %(prog)s --preset 4k60 --content video -v
+  %(prog)s --H 800 --V 480 --fp 33.3 --fr 60
+  %(prog)s --preset wvga --content static --pins 196
+
+Custom regions:
+  The screen is modeled as up to 3 regions, each with:
+    --aN  fraction of screen area (must sum to 1.0)
+    --cN  fraction of pixels in that region that change each frame (0-1)
+    --hN  average bit flips per changed pixel (0 to W, typically 0-12)
+
+  Example: 80%% static, 15%% slow updates, 5%% video
+    %(prog)s --a1 0.80 --c1 0.0 --h1 0 \\
+             --a2 0.15 --c2 0.05 --h2 4 \\
+             --a3 0.05 --c3 1.0 --h3 12
+
+  Example: Full-screen video (all pixels change every frame)
+    %(prog)s --a1 0.0 --c1 0.0 --h1 0 \\
+             --a2 0.0 --c2 0.0 --h2 0 \\
+             --a3 1.0 --c3 1.0 --h3 12
+
+  Example: Mostly static dashboard with one animated gauge
+    %(prog)s --a1 0.90 --c1 0.0 --h1 0 \\
+             --a2 0.10 --c2 0.5 --h2 6 \\
+             --a3 0.0 --c3 0.0 --h3 0
+
+  Typical h values:
+    0    = no change (static pixels)
+    4-6  = subtle changes (text updates, small color shifts)
+    8-10 = moderate changes (scrolling, UI transitions)  
+    12   = significant changes (video, animation)
+    W    = worst case (every bit flips, e.g. black<->white)
 
 Display presets: """ + ", ".join(DISPLAY_PRESETS.keys()) + """
 Content presets: """ + ", ".join(CONTENT_PRESETS.keys())
@@ -326,23 +369,31 @@ Content presets: """ + ", ".join(CONTENT_PRESETS.keys())
                       help="Refresh rate in Hz (default: 60)")
     disp.add_argument("--rho", type=float, default=0.0,
                       help="Override blanking factor (0 = auto)")
+    disp.add_argument("--pins", type=int, default=None,
+                      help="Total pins for aggregate calculation (default: W)")
 
     # Content activity
     content = ap.add_argument_group("Content activity")
     content.add_argument("--content", choices=CONTENT_PRESETS.keys(),
                          help="Use a content activity preset")
     content.add_argument("--a1", type=float, default=0.30,
-                         help="Region 1 area fraction")
+                         help="Region 1: area fraction (default: 0.30)")
     content.add_argument("--c1", type=float, default=0.0,
-                         help="Region 1 change rate")
+                         help="Region 1: pixel change rate 0-1 (default: 0.0)")
     content.add_argument("--h1", type=float, default=0,
-                         help="Region 1 bits per change")
-    content.add_argument("--a2", type=float, default=0.50)
-    content.add_argument("--c2", type=float, default=0.10)
-    content.add_argument("--h2", type=float, default=8)
-    content.add_argument("--a3", type=float, default=0.20)
-    content.add_argument("--c3", type=float, default=1.0)
-    content.add_argument("--h3", type=float, default=12)
+                         help="Region 1: bits per change 0-W (default: 0)")
+    content.add_argument("--a2", type=float, default=0.50,
+                         help="Region 2: area fraction (default: 0.50)")
+    content.add_argument("--c2", type=float, default=0.10,
+                         help="Region 2: pixel change rate (default: 0.10)")
+    content.add_argument("--h2", type=float, default=8,
+                         help="Region 2: bits per change (default: 8)")
+    content.add_argument("--a3", type=float, default=0.20,
+                         help="Region 3: area fraction (default: 0.20)")
+    content.add_argument("--c3", type=float, default=1.0,
+                         help="Region 3: pixel change rate (default: 1.0)")
+    content.add_argument("--h3", type=float, default=12,
+                         help="Region 3: bits per change (default: 12)")
 
     # Output options
     ap.add_argument("-v", "--verbose", action="store_true",
@@ -417,6 +468,7 @@ Content presets: """ + ", ".join(CONTENT_PRESETS.keys())
         f_r=f_r,
         regions=regions,
         rho_override=args.rho,
+        num_pins=args.pins,
     )
 
     errors = p.validate()
