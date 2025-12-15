@@ -172,42 +172,40 @@ class ActivityTool:
             H_avg: weighted average bit flips per pixel per frame
             active_rate: active pixels per second (H * V * f_r)
             pixel_clock_hz: pixel clock in Hz
-            rho: blanking factor (pixel_clock / active_rate)
-            AF: activity factor (fraction of max possible toggles)
-            toggles_bus: total bus toggles per second
-            toggles_active: toggles during active pixels only
+            rho: blanking factor (pixel_clock / active_rate), informational
+            AF: activity factor (H_avg / W, fraction of bits toggling per pixel)
+            toggles_sec: total data bus toggles per second (across all pins)
             per_pin: average toggles per pin per second
         """
         # Weighted average Hamming distance per pixel per frame
         H_avg = sum(r.alpha * r.c * r.h for r in self.p.regions)
 
-        # Active pixel rate
+        # Active pixel rate (actual pixel transfers per second)
         active_rate = self.p.H * self.p.V * self.p.f_r
 
-        # Pixel clock
+        # Pixel clock (for reference/validation)
         pixel_clock_hz = self.p.f_p_MHz * 1_000_000.0
 
         # Blanking factor: ratio of total pixel clocks to active pixels
-        # This accounts for horizontal and vertical blanking periods
+        # This is informational - shows overhead from H/V blanking periods
+        # Typical values: 1.1 to 1.5 depending on timing standard
         if self.p.rho_override > 0:
             rho = self.p.rho_override
         else:
             rho = pixel_clock_hz / active_rate
 
-        # Activity factor: normalized toggle rate
-        # (H_avg / W) gives fraction of bits toggling per pixel
-        # Multiplied by rho to account for blanking overhead
-        AF = (H_avg / self.p.W) * rho
+        # Activity factor: fraction of bits that toggle per pixel transfer
+        # This is content-dependent, independent of blanking
+        AF = H_avg / self.p.W
 
-        # Total bus toggles per second
-        # This represents toggles across all W pins
-        toggles_bus = pixel_clock_hz * self.p.W * AF
-
-        # Toggles during active pixels only (no blanking)
-        toggles_active = active_rate * H_avg
+        # Total toggles per second across all data pins
+        # = pixels/sec × bits_toggling/pixel
+        # Note: During blanking periods, data bus typically holds steady (no toggles)
+        toggles_sec = active_rate * H_avg
 
         # Per-pin average toggle rate
-        per_pin = toggles_bus / self.p.W
+        # (actual distribution varies by bit position and content)
+        per_pin = toggles_sec / self.p.W
 
         return {
             "H_avg": H_avg,
@@ -215,8 +213,7 @@ class ActivityTool:
             "pixel_clock_hz": pixel_clock_hz,
             "rho": rho,
             "AF": AF,
-            "toggles_bus": toggles_bus,
-            "toggles_active": toggles_active,
+            "toggles_sec": toggles_sec,
             "per_pin": per_pin,
         }
 
@@ -279,16 +276,15 @@ def print_results(p: Params, res: Dict, verbose: bool = False):
     print(f"Activity factor (AF):           {res['AF']:.6f}")
 
     print("\n--- Toggle Rates ---")
-    print(f"Bus toggles/sec:     {format_engineering(res['toggles_bus'], 'toggles/s')}")
-    print(f"Active-only/sec:     {format_engineering(res['toggles_active'], 'toggles/s')}")
-    print(f"Per-pin toggles/sec: {format_engineering(res['per_pin'], 'toggles/s')}")
+    print(f"Toggles/sec (all pins): {format_engineering(res['toggles_sec'], 'toggles/s')}")
+    print(f"Per-pin toggles/sec:    {format_engineering(res['per_pin'], 'toggles/s')}")
 
     print("\n--- Lifetime Projections (quadrillions of toggles) ---")
-    life = ActivityTool.lifetime_quadrillions(res["toggles_bus"])
+    life = ActivityTool.lifetime_quadrillions(res["toggles_sec"])
     for y, q in life.items():
         print(f"  {y:>3} years: {q:>12,.2f} Q")
 
-    years_to_1q = ActivityTool.years_to_one_quadrillion(res["toggles_bus"])
+    years_to_1q = ActivityTool.years_to_one_quadrillion(res["toggles_sec"])
     print(f"\nTime to 1 quadrillion: {years_to_1q:.4f} years")
 
     # Helpful context
