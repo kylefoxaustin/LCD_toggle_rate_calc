@@ -29,7 +29,7 @@ Outputs:
 - Lifetime projections (quadrillions of toggles)
 - Time to reach 1 quadrillion toggles
 
-Author: Kyle
+Author: Kyle Fox (https://github.com/kylefoxaustin)
 License: MIT
 """
 
